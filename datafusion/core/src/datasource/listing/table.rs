@@ -29,10 +29,10 @@ use crate::{
 use arrow::datatypes::{DataType, Field, SchemaBuilder, SchemaRef};
 use arrow_schema::Schema;
 use async_trait::async_trait;
-use datafusion_catalog::{Session, TableProvider};
+use datafusion_catalog::{memory::DataSourceExec, Session, TableProvider};
 use datafusion_common::{
     config_datafusion_err, config_err, internal_err, plan_err, project_schema,
-    stats::Precision, Constraints, DataFusionError, Result, SchemaExt,
+    stats::Precision, Constraints, DataFusionError, Result, SchemaExt, ToDFSchema,
 };
 use datafusion_datasource::{
     compute_all_files_statistics,
@@ -47,6 +47,9 @@ use datafusion_execution::{
 use datafusion_expr::{
     dml::InsertOp, Expr, SortExpr, TableProviderFilterPushDown, TableType,
 };
+
+use datafusion_expr::utils::conjunction;
+use datafusion_physical_expr::create_physical_expr;
 use datafusion_physical_expr_common::sort_expr::LexOrdering;
 use datafusion_physical_plan::{empty::EmptyExec, ExecutionPlan, Statistics};
 use futures::{future, stream, Stream, StreamExt, TryStreamExt};
@@ -1003,7 +1006,8 @@ impl TableProvider for ListingTable {
         };
 
         // create the execution plan
-        self.options
+        let mut execution_plan = self
+            .options
             .format
             .create_physical_plan(
                 state,
@@ -1021,7 +1025,25 @@ impl TableProvider for ListingTable {
                 .with_table_partition_cols(table_partition_cols)
                 .build(),
             )
-            .await
+            .await?;
+
+        // Add partition filters' equivalence classes info to the execution plan if it's DataSourceExecAdd commentMore actions
+        if let Some(exec) = execution_plan.as_any().downcast_ref::<DataSourceExec>() {
+            let partition_filter = conjunction(partition_filters);
+            if let Some(partition_filter) = partition_filter {
+                let table_df_schema = self.table_schema.as_ref().clone().to_dfschema()?;
+                let partition_physical_filter = create_physical_expr(
+                    &partition_filter,
+                    &table_df_schema,
+                    state.execution_props(),
+                )?;
+                execution_plan =
+                    Arc::new(exec.clone().add_partition_filter_equivalence_info(
+                        partition_physical_filter,
+                    )?);
+            }
+        }
+        Ok(execution_plan)
     }
 
     fn supports_filters_pushdown(

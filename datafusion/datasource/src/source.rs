@@ -25,6 +25,7 @@ use std::sync::Arc;
 use datafusion_physical_plan::execution_plan::{
     Boundedness, EmissionType, SchedulingType,
 };
+use datafusion_physical_plan::filter::collect_columns_from_predicate;
 use datafusion_physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion_physical_plan::projection::ProjectionExec;
 use datafusion_physical_plan::{
@@ -370,6 +371,20 @@ impl DataSourceExec {
     pub fn with_partitioning(mut self, partitioning: Partitioning) -> Self {
         self.cache = self.cache.with_partitioning(partitioning);
         self
+    }
+
+    /// Add partition filters' equivalence info
+    pub fn add_partition_filter_equivalence_info(
+        mut self,
+        partition_filter: Arc<dyn PhysicalExpr>,
+    ) -> Result<Self> {
+        let (equal_pairs, _) = collect_columns_from_predicate(&partition_filter);
+        for (lhs, rhs) in equal_pairs {
+            self.cache
+                .eq_properties
+                .add_equal_conditions(Arc::clone(lhs), Arc::clone(rhs))?;
+        }
+        Ok(self)
     }
 
     fn compute_properties(data_source: Arc<dyn DataSource>) -> PlanProperties {
